@@ -1,0 +1,18 @@
+﻿<Project Sdk="Microsoft.NET.Sdk.Worker">
+
+  <PropertyGroup>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <Nullable>enable</Nullable>
+	  <UseWPF>true</UseWPF>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <UserSecretsId>dotnet-Nasa_Wallpaper_Service-fda02b49-16a5-41eb-b60d-a1522322cb80</UserSecretsId>
+    <RootNamespace>Nasa_Wallpaper_Service</RootNamespace>
+    <StartupObject></StartupObject>
+    <Authors>timearley89</Authors>
+    <Description>Downloads the image of the day from nasa and sets it to desktop background.</Description>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.Extensions.Hosting" Version="8.0.0" />
+  </ItemGroup>
+</Project>
