@@ -8,11 +8,18 @@
     <UserSecretsId>dotnet-Nasa_Wallpaper_Service-fda02b49-16a5-41eb-b60d-a1522322cb80</UserSecretsId>
     <RootNamespace>Nasa_Wallpaper_Service</RootNamespace>
     <StartupObject></StartupObject>
+	<OutputType>exe</OutputType>
+	<PublishSingleFile Condition="'$(Configuration)' == 'Release'">true</PublishSingleFile>
+	<RuntimeIdentifier>win-x64</RuntimeIdentifier>
+	<PlatformTarget>x64</PlatformTarget>
     <Authors>timearley89</Authors>
     <Description>Downloads the image of the day from nasa and sets it to desktop background.</Description>
+    <NoWin32Manifest>true</NoWin32Manifest>
   </PropertyGroup>
 
   <ItemGroup>
+    <PackageReference Include="CliWrap" Version="3.6.6" />
     <PackageReference Include="Microsoft.Extensions.Hosting" Version="8.0.0" />
+	<PackageReference Include="Microsoft.Extensions.Hosting.WindowsServices" Version="8.0.0" />
   </ItemGroup>
 </Project>

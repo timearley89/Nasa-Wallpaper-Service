@@ -5,10 +5,15 @@ using System.Net.Http.Json;
 using System.Runtime.InteropServices;
 using System.Windows;
 using System.Windows.Media.Imaging;
+using Microsoft.Extensions.Logging.EventLog;
+using System.Text.Json.Serialization;
+using System.CodeDom;
+using System.Collections.ObjectModel;
 namespace Nasa_Wallpaper_Service
 {
     public class Worker : BackgroundService
     {
+
         public const string ApiKey = "ouj8D9mMF3LafsGjA9faiDlxHmDHThprcf1xvrBx";
 
         [DllImport("user32.dll", CharSet = CharSet.Auto)]
@@ -34,9 +39,8 @@ namespace Nasa_Wallpaper_Service
                     _logger.LogInformation("Worker running at: {time}", DateTimeOffset.Now);
                 }
                 await GetWallpaper(_logger);
-                //sleep for one hour, then run again.
-                _logger.LogInformation($"{DateTime.Now}: Run complete. Sleeping til next run...");
-                Thread.Sleep(3600000);
+                _logger.LogInformation($"{DateTime.Now}: Run complete. Waiting til next run...");
+                await Task.Delay(TimeSpan.FromHours(1));
             }
         }
 
@@ -49,19 +53,21 @@ namespace Nasa_Wallpaper_Service
 
         public async static Task DownloadImageOfTheDay(ILogger<Worker> logger)
         {
-            using (HttpResponseMessage myResponse = await ApiClient.NasaClient.GetAsync($"https://api.nasa.gov/planetary/apod?api_key={ApiKey}"))
+            const string NasaImageOfTheDayQueryUrl = $"https://api.nasa.gov/planetary/apod?api_key={ApiKey}&count=1";
+            const string NasaImageLibraryQueryUrl = $"https://images-api.nasa.gov/search?media_type=image&q=galaxy";
+            using (HttpResponseMessage myResponse = await ApiClient.NasaClient.GetAsync(NasaImageLibraryQueryUrl))
             {
                 if (myResponse.IsSuccessStatusCode)
                 {
                     logger.LogInformation($"{DateTime.Now}: Request successful. Parsing response...");
                     try
                     {
-                        IOTD? imageOTD = await myResponse.Content.ReadFromJsonAsync<IOTD>();
-                        if (imageOTD != null)
+                        NasaImageObject? imageObj = await myResponse.Content.ReadFromJsonAsync<NasaImageObject>();
+                        if (imageObj != null)
                         {
                             logger.LogInformation($"{DateTime.Now}:Parsing complete. Downloading image from stream...");
-                            Uri imgUri = new(imageOTD.Url);
-                            JpegBitmapDecoder decoder = new JpegBitmapDecoder(imgUri, BitmapCreateOptions.DelayCreation, BitmapCacheOption.Default);
+                            JpegBitmapDecoder decoder = await GetDecoderFromJson(GetRandomImageItem(imageObj));
+                            decoder.DownloadCompleted += (sender, e) => DownloadCompleted(sender, e, logger);
                             BitmapFrame tempStorage = decoder.Frames.First();
                             while (decoder.IsDownloading)
                             {
@@ -88,7 +94,7 @@ namespace Nasa_Wallpaper_Service
         {
             RegistryKey? key = Registry.CurrentUser.OpenSubKey(@"Control Panel\Desktop", true);
             //set style to span
-            key!.SetValue(@"WallpaperStyle", 22.ToString());
+            key!.SetValue(@"WallpaperStyle", 0.ToString());
             //do not tile
             key!.SetValue(@"TileWallpaper", 0.ToString());
 
@@ -117,6 +123,10 @@ namespace Nasa_Wallpaper_Service
             if (image.Frames.Any())
             {
                 encoder.Frames.Add(image.Frames.First());
+                if (image.Metadata != null)
+                {
+                    encoder.Metadata = image.Metadata;
+                }
                 encoder.Save(fs);
             }
             fs.Dispose();
@@ -134,9 +144,91 @@ namespace Nasa_Wallpaper_Service
             MessageBox.Show($"Progress Updated: {e.Progress}%");
             return;
         }
+
+        public static NasaItem GetRandomImageItem(NasaImageObject nasaobj)
+        {
+            Random myRand = new Random();
+            if (nasaobj != null && nasaobj.Collection != null && nasaobj.Collection.Items.Length != 0)
+            {
+                return nasaobj.Collection.Items[myRand.Next(0, nasaobj.Collection.Items.Length)];
+            }
+            else
+            {
+                throw new ArgumentNullException(nameof(nasaobj), "The input object was invalid.");
+            }
+        }
+
+        public async static Task<JpegBitmapDecoder> GetDecoderFromJson(NasaItem nasaitem)
+        {
+            JpegBitmapDecoder myDecoder;
+            if (nasaitem.URLs == null)
+            {
+                using (HttpResponseMessage myResponse = await ApiClient.NasaClient.GetAsync(nasaitem.Href))
+                {
+                    if (myResponse.IsSuccessStatusCode)
+                    {
+                        nasaitem.URLs = await myResponse.Content.ReadFromJsonAsync<string[]>();
+                    }
+                }
+            }
+            //create a uri with which to build the decoder. Use the largest size image url in the item.
+            Uri myImageUri;
+            if (nasaitem.URLs!.Any(x => x.Contains("~large.jpg")))
+            {
+                myImageUri = new(nasaitem.URLs!.Where(x => x.Contains("~large.jpg")).First());
+            }
+            else if (nasaitem.URLs!.Any(x => x.Contains("~medium.jpg")))
+            {
+                myImageUri = new(nasaitem.URLs!.Where(x => x.Contains("~medium.jpg")).First());
+            }
+            else
+            {
+                myImageUri = new(nasaitem.URLs!.Where(x => x.Contains("~orig.jpg")).First());
+            }
+            myDecoder = new(myImageUri, BitmapCreateOptions.None, BitmapCacheOption.OnDemand);
+            return myDecoder;
+        }
     }
     public class IOTD
     {
         public string Url { get; set; } = "";
+    }
+    public class NasaImageObject
+    {
+        public NasaImageCollection Collection { get; set; } = new();
+    }
+    public class NasaImageCollection
+    {
+        public NasaItem[] Items { get; set; } = new NasaItem[0];
+        public NasaCollectionMetadata Metadata { get; set; } = new();
+    }
+    public class NasaItem
+    {
+        /// <summary>
+        /// A string containing a URL for a json collection of image URL's.
+        /// </summary>
+        public string Href { get; set; } = "";
+        public string[]? URLs { get; set; } = null;
+        public NasaItemData[] Data { get; set; } = new NasaItemData[0];
+    }
+    public class NasaCollectionMetadata
+    {
+        public int Total_hits { get; set; } = 0;
+    }
+    public class NasaItemData
+    {
+        public string Center { get; set; } = "";
+        public string Title { get; set; } = "";
+        public string Nasa_id { get; set; } = "";
+        public string Date_created { get; set; } = "";
+        public string Media_type { get; set; } = "";
+        public string Description { get; set; } = "";
+        public string[] Keywords { get; set; } = new string[0];
+    }
+    public class NasaItemDataLinks
+    {
+        public string Href { get; set; } = "";
+        public string Rel { get; set; } = "";
+        public string Render { get; set; } = "";
     }
 }

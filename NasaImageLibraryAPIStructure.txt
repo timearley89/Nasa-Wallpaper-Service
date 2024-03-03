@@ -1,0 +1,64 @@
+(object)collection
+{
+	(string)version "1.0"
+	(string)href "nasa.gov/search?q=apollo%2011..."
+	(object)items
+	{
+		(string)href "collection.json"
+		(object)data
+		{
+			(string)center "JSC"
+			(string)title "Apollo 11..."
+			(string)location "SomeLoc..."
+			(string)nasa_id "as11-40-5874"
+			(string)date_created "1969-07-21T00:00:00z"
+			(string)media_type "image"
+			(string)description "Astronaut Edwin E. Al..."
+			(string[])keywords
+			{
+				(string)"keyword1"
+				(string)"keyword2"
+				(string)"keyword3"
+			}
+			(string[])links
+			{
+				(string)href "thumbs.jpg"
+				(string)rel "preview"
+				(string)render "image"
+			}
+		}
+	}
+	(object)metadata
+	{
+		(int)total_hits "336"
+	}
+}
+
+(string[])item.collection.json
+{
+	(string)"...~orig.jpg"
+	(string)"...~large.jpg"
+	(string)"...~medium.jpg"
+	(string)"...~small.jpg"
+	(string)"...~thumb.jpg"
+	(string)".../metadata.json"
+}
+
+(string[])item.collection.metadata.json
+{
+	(string)AVAIL:DateCreated "1969:07:21"
+	(string)File:MIMEType "image/jpeg"
+	(string)AVAIL:Center "JSC"
+	(string[])AVAIL:Keywords
+	{
+		(string)"APOLLO 11 FLIGHT"
+		(string)"MOON"
+		(string)"LUNAR SURFACE"
+	}
+	(string)EXIF:Compression "uncompressed"
+	(string)AVAIL:Title "Apollo 11 Missio..."
+	(string)AVAIL:Description "Astronaut Edwin..."
+	(string)File:FileType "JPEG"
+	(string)AVAIL:Photographer ""
+	(string)File:FileName "as11-40-5874.jpg"
+}
