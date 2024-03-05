@@ -13,8 +13,9 @@ namespace Nasa_Wallpaper_Service
 {
     public class Worker : BackgroundService
     {
-
         public const string ApiKey = "ouj8D9mMF3LafsGjA9faiDlxHmDHThprcf1xvrBx";
+        NasaImageObject myImageObject = new();
+        Random myRandomNum = new();
 
         [DllImport("user32.dll", CharSet = CharSet.Auto)]
         private static extern Int32 SystemParametersInfo(UInt32 action, UInt32 uParam, String vParam, UInt32 winIni);
@@ -38,20 +39,36 @@ namespace Nasa_Wallpaper_Service
                 {
                     _logger.LogInformation("Worker running at: {time}", DateTimeOffset.Now);
                 }
-                await GetWallpaper(_logger);
+                await GetWallpaper(_logger, myImageObject, myRandomNum);
                 _logger.LogInformation($"{DateTime.Now}: Run complete. Waiting til next run...");
                 await Task.Delay(TimeSpan.FromHours(1));
             }
         }
 
-        public async static Task GetWallpaper(ILogger<Worker> logger)
+        public async static Task GetWallpaper(ILogger<Worker> logger, NasaImageObject myObject, Random myRand)
         {
-            logger.LogInformation($"{DateTime.Now}: Sending Request...");
-            await DownloadImageOfTheDay(logger);
-            
+            logger.LogInformation($"{DateTime.Now}: Checking internal library...");
+            if (myObject.Collection.Items.Length == 0 || myObject.Collection.Items.All(x => x.HasBeenDisplayed == true))
+            {
+                //if we don't have any URLs or if they've all been displayed, download new ones.
+                logger.LogInformation($"{DateTime.Now}: {(myObject.Collection.Items.Length == 0 ? "Library empty. Sending request..." : "All images have been displayed. Requesting new library...")}");
+                myObject = await DownloadImageOfTheDay(logger);
+            }
+            //pick one of the images within the dictionary to display.
+            logger.LogInformation($"{DateTime.Now}: Selecting Image and building decoder...");
+            JpegBitmapDecoder decoder = await GetDecoderFromJson(myObject.Collection.Items.Where(x => x.HasBeenDisplayed == false)
+                .ElementAt(myRand.Next(0, myObject.Collection.Items.Count(x => x.HasBeenDisplayed == false) - 1)));
+            logger.LogInformation($"{DateTime.Now}: Decoder built successfully. Calling Save Operation...");
+            decoder.DownloadCompleted += (sender, e) => DownloadCompleted(sender, e, logger);
+            BitmapFrame tempStorage = decoder.Frames.First();
+            while (decoder.IsDownloading)
+            {
+                Thread.Sleep(50);
+            }
+            DownloadCompleted(decoder, EventArgs.Empty, logger);
         }
 
-        public async static Task DownloadImageOfTheDay(ILogger<Worker> logger)
+        public async static Task<NasaImageObject> DownloadImageOfTheDay(ILogger<Worker> logger)
         {
             const string NasaImageOfTheDayQueryUrl = $"https://api.nasa.gov/planetary/apod?api_key={ApiKey}&count=1";
             const string NasaImageLibraryQueryUrl = $"https://images-api.nasa.gov/search?media_type=image&q=galaxy";
@@ -65,16 +82,9 @@ namespace Nasa_Wallpaper_Service
                         NasaImageObject? imageObj = await myResponse.Content.ReadFromJsonAsync<NasaImageObject>();
                         if (imageObj != null)
                         {
-                            logger.LogInformation($"{DateTime.Now}:Parsing complete. Downloading image from stream...");
-                            JpegBitmapDecoder decoder = await GetDecoderFromJson(GetRandomImageItem(imageObj));
-                            decoder.DownloadCompleted += (sender, e) => DownloadCompleted(sender, e, logger);
-                            BitmapFrame tempStorage = decoder.Frames.First();
-                            while (decoder.IsDownloading)
-                            {
-                                Thread.Sleep(50);
-                            }
-                            DownloadCompleted(decoder, EventArgs.Empty, logger);
-                            return;
+                            logger.LogInformation($"{DateTime.Now}:Parsing complete.");
+                            Dictionary<string, bool> myImages = new Dictionary<string, bool>();
+                            return imageObj;
                         }
                         else
                         {
@@ -92,9 +102,11 @@ namespace Nasa_Wallpaper_Service
 
         public static void ApplyWallpaper(string imagePath, ILogger<Worker> logger)
         {
+            if (!File.Exists(imagePath)) { throw new ArgumentNullException(nameof(imagePath), "The file could not be found."); }
+            WallpaperStyle wallStyle = WallpaperStyle.Fit;
             RegistryKey? key = Registry.CurrentUser.OpenSubKey(@"Control Panel\Desktop", true);
             //set style to span
-            key!.SetValue(@"WallpaperStyle", 0.ToString());
+            key!.SetValue(@"WallpaperStyle", ((int)wallStyle).ToString());
             //do not tile
             key!.SetValue(@"TileWallpaper", 0.ToString());
 
@@ -105,33 +117,59 @@ namespace Nasa_Wallpaper_Service
 
         public static void DownloadCompleted(object? sender, EventArgs e, ILogger<Worker> logger)
         {
-            if (sender == null) 
+            if (sender == null)
             {
                 logger.LogError($"{DateTime.Now}: Decoder is null. Stream download error.");
-                return; 
+                return;
             }
             logger.LogInformation($"{DateTime.Now}: Download complete. Saving image to disk...");
             JpegBitmapDecoder image = (JpegBitmapDecoder)sender;
             JpegBitmapEncoder encoder = new JpegBitmapEncoder();
-            string imagePath = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData) + @"/Earleytech/Nasa Wallpaper Service/";
+            string imagePath = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData) + @"\Earleytech\Nasa Wallpaper Service\";
             if (!Directory.Exists(imagePath))
             {
                 Directory.CreateDirectory(imagePath);
             }
-            FileStream fs = new FileStream(imagePath + "ImageOTD.jpeg",
-                FileMode.Create, FileAccess.ReadWrite, FileShare.ReadWrite);
-            if (image.Frames.Any())
+            string[] imageFiles = Directory.GetFiles(imagePath);
+            bool AlreadyHaveFile = false;
+            string fileName = "";
+            foreach (string file in imageFiles)
             {
-                encoder.Frames.Add(image.Frames.First());
-                if (image.Metadata != null)
+                FileStream fs = new FileStream(file, FileMode.Open, FileAccess.Read);
+                JpegBitmapDecoder thisdecoder = new JpegBitmapDecoder(fs, BitmapCreateOptions.None, BitmapCacheOption.OnLoad);
+                BitmapFrame tempframe = thisdecoder.Frames.First();
+                while (thisdecoder.IsDownloading) { Thread.Sleep(10); }
+                BitmapMetadata fileMetadata = (BitmapMetadata)thisdecoder.Frames.First().Metadata;
+                BitmapMetadata imageMetadata = (BitmapMetadata)image.Frames.First().Metadata;
+                if (fileMetadata != null && fileMetadata.Title == imageMetadata.Title && fileMetadata.Subject == imageMetadata.Subject && fileMetadata.DateTaken == imageMetadata.DateTaken)
                 {
-                    encoder.Metadata = image.Metadata;
+                    //we already have this file on disk, no need to save it.
+                    AlreadyHaveFile = true;
+                    fileName = file;
                 }
-                encoder.Save(fs);
+                fs.Dispose();
             }
-            fs.Dispose();
-            logger.LogInformation($"{DateTime.Now}: Save complete. Applying wallpaper...");
-            ApplyWallpaper(imagePath + "ImageOTD.jpeg", logger);
+            if (!AlreadyHaveFile)
+            {
+                int imageCount = imageFiles.Length;
+                fileName = imagePath + $"ImageOTD{imageCount}.jpeg";
+                //should the fileName be the same as on the server? Right now it isn't, I suppose it doesn't really matter...
+                FileStream fs = new FileStream(fileName,
+                    FileMode.Create, FileAccess.ReadWrite, FileShare.ReadWrite);
+                if (image.Frames.Any())
+                {
+                    encoder.Frames.Add(image.Frames.First());
+                    if (image.Metadata != null)
+                    {
+                        encoder.Metadata = image.Metadata;
+                    }
+                    encoder.Save(fs);
+                }
+                fs.Dispose();
+                logger.LogInformation($"{DateTime.Now}: Save complete. Applying wallpaper as '{fileName}'");
+            }
+            else { logger.LogInformation($"{DateTime.Now}: Already have file on disk. Applying wallpaper as '{fileName}'"); }
+            ApplyWallpaper(fileName, logger);
         }
 
         public static void DownloadFailed(object? sender, EventArgs e)
@@ -143,19 +181,6 @@ namespace Nasa_Wallpaper_Service
         {
             MessageBox.Show($"Progress Updated: {e.Progress}%");
             return;
-        }
-
-        public static NasaItem GetRandomImageItem(NasaImageObject nasaobj)
-        {
-            Random myRand = new Random();
-            if (nasaobj != null && nasaobj.Collection != null && nasaobj.Collection.Items.Length != 0)
-            {
-                return nasaobj.Collection.Items[myRand.Next(0, nasaobj.Collection.Items.Length)];
-            }
-            else
-            {
-                throw new ArgumentNullException(nameof(nasaobj), "The input object was invalid.");
-            }
         }
 
         public async static Task<JpegBitmapDecoder> GetDecoderFromJson(NasaItem nasaitem)
@@ -171,9 +196,14 @@ namespace Nasa_Wallpaper_Service
                     }
                 }
             }
+            else { throw new HttpRequestException("Error retrieving URLs from server");}
             //create a uri with which to build the decoder. Use the largest size image url in the item.
             Uri myImageUri;
-            if (nasaitem.URLs!.Any(x => x.Contains("~large.jpg")))
+            if (nasaitem.URLs!.Any(x => x.Contains("~orig.jpg")))
+            {
+                myImageUri = new(nasaitem.URLs!.Where(x => x.Contains("~orig.jpg")).First());
+            }
+            else if (nasaitem.URLs!.Any(x => x.Contains("~large.jpg")))
             {
                 myImageUri = new(nasaitem.URLs!.Where(x => x.Contains("~large.jpg")).First());
             }
@@ -181,10 +211,22 @@ namespace Nasa_Wallpaper_Service
             {
                 myImageUri = new(nasaitem.URLs!.Where(x => x.Contains("~medium.jpg")).First());
             }
+            else if (nasaitem.URLs!.Any(x => x.Contains("~small.jpg")))
+            {
+                myImageUri = new(nasaitem.URLs!.Where(x => x.Contains("~small.jpg")).First());
+            }
             else
             {
-                myImageUri = new(nasaitem.URLs!.Where(x => x.Contains("~orig.jpg")).First());
+                try
+                {
+                    myImageUri = new(nasaitem.URLs!.First(x => !x.Contains("metadata.json")));
+                }
+                catch (ArgumentNullException)
+                {
+                    throw new ArgumentOutOfRangeException(nameof(nasaitem), "The collection.json object does not reference an image.");
+                }
             }
+            nasaitem.HasBeenDisplayed = true;
             myDecoder = new(myImageUri, BitmapCreateOptions.None, BitmapCacheOption.OnDemand);
             return myDecoder;
         }
@@ -210,6 +252,7 @@ namespace Nasa_Wallpaper_Service
         public string Href { get; set; } = "";
         public string[]? URLs { get; set; } = null;
         public NasaItemData[] Data { get; set; } = new NasaItemData[0];
+        public bool HasBeenDisplayed { get; set; } = false;
     }
     public class NasaCollectionMetadata
     {
@@ -230,5 +273,13 @@ namespace Nasa_Wallpaper_Service
         public string Href { get; set; } = "";
         public string Rel { get; set; } = "";
         public string Render { get; set; } = "";
+    }
+    public enum WallpaperStyle
+    {
+        CenterOrTile = 0,
+        Stretch = 2,
+        Fit = 6,
+        Fill = 10,
+        Span = 22
     }
 }
