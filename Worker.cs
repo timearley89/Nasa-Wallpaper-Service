@@ -9,11 +9,14 @@ using Microsoft.Extensions.Logging.EventLog;
 using System.Text.Json.Serialization;
 using System.CodeDom;
 using System.Collections.ObjectModel;
+using System.Windows.Media;
+using System.Xml.Serialization;
 namespace Nasa_Wallpaper_Service
 {
     public class Worker : BackgroundService
     {
         public const string ApiKey = "ouj8D9mMF3LafsGjA9faiDlxHmDHThprcf1xvrBx";
+        public readonly string SearchConfigPath = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData) + @"\Earleytech\Nasa Wallpaper Service\SearchConfig.xml";
         NasaImageObject myImageObject = new();
         Random myRandomNum = new();
 
@@ -39,20 +42,20 @@ namespace Nasa_Wallpaper_Service
                 {
                     _logger.LogInformation("Worker running at: {time}", DateTimeOffset.Now);
                 }
-                await GetWallpaper(_logger, myImageObject, myRandomNum);
+                myImageObject = await GetWallpaper(_logger, myImageObject, myRandomNum, SearchConfigPath);
                 _logger.LogInformation($"{DateTime.Now}: Run complete. Waiting til next run...");
                 await Task.Delay(TimeSpan.FromHours(1));
             }
         }
 
-        public async static Task GetWallpaper(ILogger<Worker> logger, NasaImageObject myObject, Random myRand)
+        public async static Task<NasaImageObject> GetWallpaper(ILogger<Worker> logger, NasaImageObject myObject, Random myRand, string SearchConfigPath)
         {
             logger.LogInformation($"{DateTime.Now}: Checking internal library...");
             if (myObject.Collection.Items.Length == 0 || myObject.Collection.Items.All(x => x.HasBeenDisplayed == true))
             {
                 //if we don't have any URLs or if they've all been displayed, download new ones.
                 logger.LogInformation($"{DateTime.Now}: {(myObject.Collection.Items.Length == 0 ? "Library empty. Sending request..." : "All images have been displayed. Requesting new library...")}");
-                myObject = await DownloadImageOfTheDay(logger);
+                myObject = await DownloadImageOfTheDay(logger, SearchConfigPath);
             }
             //pick one of the images within the dictionary to display.
             logger.LogInformation($"{DateTime.Now}: Selecting Image and building decoder...");
@@ -66,12 +69,14 @@ namespace Nasa_Wallpaper_Service
                 Thread.Sleep(50);
             }
             DownloadCompleted(decoder, EventArgs.Empty, logger);
+            return myObject;
         }
 
-        public async static Task<NasaImageObject> DownloadImageOfTheDay(ILogger<Worker> logger)
+        public async static Task<NasaImageObject> DownloadImageOfTheDay(ILogger<Worker> logger, string SearchConfigPath)
         {
             const string NasaImageOfTheDayQueryUrl = $"https://api.nasa.gov/planetary/apod?api_key={ApiKey}&count=1";
-            const string NasaImageLibraryQueryUrl = $"https://images-api.nasa.gov/search?media_type=image&q=galaxy";
+            string NasaImageLibraryQueryUrl = await GenerateSearchString(SearchConfigPath, logger);
+            //const string NasaImageLibraryQueryUrl = $"https://images-api.nasa.gov/search?media_type=image&keywords=star,hubble,galaxy,black%20hole,andromeda&page_size=1000";
             using (HttpResponseMessage myResponse = await ApiClient.NasaClient.GetAsync(NasaImageLibraryQueryUrl))
             {
                 if (myResponse.IsSuccessStatusCode)
@@ -130,7 +135,7 @@ namespace Nasa_Wallpaper_Service
             {
                 Directory.CreateDirectory(imagePath);
             }
-            string[] imageFiles = Directory.GetFiles(imagePath);
+            string[] imageFiles = Directory.GetFiles(imagePath).Where(x => !x.Contains(".xml")).ToArray<string>();
             bool AlreadyHaveFile = false;
             string fileName = "";
             foreach (string file in imageFiles)
@@ -146,13 +151,17 @@ namespace Nasa_Wallpaper_Service
                     //we already have this file on disk, no need to save it.
                     AlreadyHaveFile = true;
                     fileName = file;
+                    //if we already have the file, dispose the stream and break the loop - no need to check the rest of the files. Saves some IO.
+                    fs.Dispose();
+                    break;
                 }
                 fs.Dispose();
             }
             if (!AlreadyHaveFile)
             {
                 int imageCount = imageFiles.Length;
-                fileName = imagePath + $"ImageOTD{imageCount}.jpeg";
+                //if we need to save the file to disk, if it has a comment containing it's original URL, use the filename within that. Otherwise, generate a new name.
+                fileName = imagePath + (Path.GetFileName(((BitmapMetadata)image.Frames.First().Metadata).Comment) ?? $"ImageOTD{imageCount}.jpeg");
                 //should the fileName be the same as on the server? Right now it isn't, I suppose it doesn't really matter...
                 FileStream fs = new FileStream(fileName,
                     FileMode.Create, FileAccess.ReadWrite, FileShare.ReadWrite);
@@ -227,8 +236,84 @@ namespace Nasa_Wallpaper_Service
                 }
             }
             nasaitem.HasBeenDisplayed = true;
-            myDecoder = new(myImageUri, BitmapCreateOptions.None, BitmapCacheOption.OnDemand);
+            myDecoder = new(myImageUri, BitmapCreateOptions.None, BitmapCacheOption.OnLoad);
+            JpegBitmapEncoder myEncoder = new();
+            BitmapMetadata? newMetadata = myDecoder.Frames.First().Metadata.Clone() as BitmapMetadata;
+            if (newMetadata != null)
+            {
+                newMetadata.Comment = Path.GetFileName(myImageUri.OriginalString);
+                BitmapFrame frame = (BitmapFrame)myDecoder.Frames.First().Clone();
+                if (frame != null)
+                {
+                    myEncoder.Frames.Add(BitmapFrame.Create(frame, frame.Thumbnail, newMetadata, frame.ColorContexts));
+                }
+            }
+            MemoryStream ms = new MemoryStream();
+            myEncoder.Save(ms);
+            ms.Seek(0, SeekOrigin.Begin);
+            myDecoder = new(ms, BitmapCreateOptions.None, BitmapCacheOption.OnLoad);
+            //((BitmapMetadata)myDecoder.Frames.First().Metadata).Comment = myImageUri.OriginalString;
             return myDecoder;
+        }
+        public async static Task<string> GenerateSearchString(string SearchConfigPath, ILogger<Worker> logger)
+        {
+            SearchConfig? myConfig = new();
+            if (File.Exists(SearchConfigPath))
+            {
+                logger.LogInformation($"{DateTime.Now}: Config File Found. Loading...");
+                using (FileStream fs = new FileStream(SearchConfigPath, FileMode.Open, FileAccess.Read))
+                {
+                    XmlSerializer xser = new(typeof(SearchConfig));
+                    myConfig = await Task.Run(() => (SearchConfig?)xser.Deserialize(fs));
+                    logger.LogInformation($"{DateTime.Now}: Loaded. Constructing query...");
+                }
+            }
+            else
+            {
+                logger.LogInformation($"{DateTime.Now}: Config File Not Found. Creating...");
+                myConfig = new SearchConfig() { MediaType = "image", PageSize = 100, Keywords = new string[] { "hubble", "galaxy", "black%20hole", "andromeda"} };
+                if (!Directory.Exists(Path.GetDirectoryName(SearchConfigPath)))
+                {
+                    Directory.CreateDirectory(Path.GetDirectoryName(SearchConfigPath)!);
+                }
+                using (FileStream fs = new FileStream(SearchConfigPath, FileMode.Create, FileAccess.Write))
+                {
+                    XmlSerializer xser = new(typeof(SearchConfig));
+                    await Task.Run(() => xser.Serialize(fs, myConfig));
+                    logger.LogInformation($"{DateTime.Now}: Created. Constructing query...");
+                }
+            }
+            string searchquery = "https://images-api.nasa.gov/search?";
+            bool propertyadded = false;
+            if (myConfig != null && myConfig.MediaType != "")
+            {
+                if (propertyadded) { searchquery += "&"; }
+                searchquery += $"media_type={myConfig.MediaType}";
+                propertyadded = true;
+            }
+            if (myConfig != null && myConfig.PageSize != 0)
+            {
+                if (propertyadded) { searchquery += "&"; }
+                searchquery += $"page_size={myConfig.PageSize}";
+            }
+            if (myConfig != null && myConfig.Keywords.Length != 0)
+            {
+                if (propertyadded) { searchquery += "&"; }
+                for (int i = 0; i <  myConfig.Keywords.Length; i++)
+                {
+                    if (i == 0)
+                    {
+                        searchquery += "keywords=";
+                    }
+                    searchquery += myConfig.Keywords[i];
+                    if (i < myConfig.Keywords.Length - 1)
+                    {
+                        searchquery += ",";
+                    }
+                }
+            }
+            logger.LogInformation($"{DateTime.Now}: Query construction complete. Querying API...");
+            return searchquery;
         }
     }
     public class IOTD
@@ -281,5 +366,11 @@ namespace Nasa_Wallpaper_Service
         Fit = 6,
         Fill = 10,
         Span = 22
+    }
+    public class SearchConfig
+    {
+        public string MediaType { get; set; } = "image";
+        public int PageSize { get; set; } = 100;
+        public string[] Keywords { get; set; } = new string[0];
     }
 }
